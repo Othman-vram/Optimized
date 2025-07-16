@@ -155,9 +155,12 @@ class CanvasWidget(QWidget):
         # Mark new or potentially changed fragments as dirty
         for fragment in fragments:
             if (fragment.id not in old_fragment_ids or 
-                not fragment.cache_valid or
+                not fragment.cache_valid or 
                 fragment.id in self.dirty_fragments):
                 self.dirty_fragments.add(fragment.id)
+                # Remove old cached pixmap to force re-render
+                self.fragment_pixmaps.pop(fragment.id, None)
+                self.fragment_zoom_cache.pop(fragment.id, None)
                 
         self.fragments = fragments
         self.schedule_render()
@@ -246,6 +249,9 @@ class CanvasWidget(QWidget):
         height, width = image.shape[:2]
         
         # Ensure image is in the right format
+        if not image.flags['C_CONTIGUOUS']:
+            image = np.ascontiguousarray(image)
+            
         if len(image.shape) == 3:
             if image.shape[2] == 4:  # RGBA
                 bytes_per_line = 4 * width
@@ -259,7 +265,7 @@ class CanvasWidget(QWidget):
             return None
             
         # Create QImage
-        q_image = QImage(image.data, width, height, bytes_per_line, format)
+        q_image = QImage(image.tobytes(), width, height, bytes_per_line, format)
         return QPixmap.fromImage(q_image)
         
     def get_zoom_level(self) -> float:

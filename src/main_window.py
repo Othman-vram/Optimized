@@ -113,6 +113,10 @@ class MainWindow(QMainWindow):
         # Update canvas with new fragment data
         self.canvas_widget.update_fragments(self.fragment_manager.get_all_fragments())
         
+        # Update control panel for selected fragment
+        selected_fragment = self.fragment_manager.get_selected_fragment()
+        self.control_panel.set_selected_fragment(selected_fragment)
+        
     def setup_menu_bar(self):
         """Setup the menu bar"""
         menubar = self.menuBar()
