@@ -117,7 +117,15 @@ class FragmentManager(QObject):
         """Rotate fragment by angle (90 degree increments)"""
         fragment = self._fragments.get(fragment_id)
         if fragment:
-            fragment.rotation = (fragment.rotation + angle) % 360
+            fragment.rotation = (fragment.rotation + angle) % 360.0
+            fragment.invalidate_cache()
+            self.fragments_changed.emit()
+    
+    def set_fragment_rotation(self, fragment_id: str, angle: float):
+        """Set fragment rotation to specific angle"""
+        fragment = self._fragments.get(fragment_id)
+        if fragment:
+            fragment.rotation = angle % 360.0
             fragment.invalidate_cache()
             self.fragments_changed.emit()
     
@@ -141,7 +149,7 @@ class FragmentManager(QObject):
         if fragment:
             transform_changed = False
             if rotation is not None:
-                fragment.rotation = rotation % 360
+                fragment.rotation = float(rotation) % 360.0
                 transform_changed = True
             if translation is not None:
                 fragment.x, fragment.y = translation

@@ -161,6 +161,15 @@ class CanvasWidget(QWidget):
                 # Remove old cached pixmap to force re-render
                 self.fragment_pixmaps.pop(fragment.id, None)
                 self.fragment_zoom_cache.pop(fragment.id, None)
+            
+            # Also mark as dirty if visibility changed
+            old_fragment = next((f for f in self.fragments if f.id == fragment.id), None)
+            if old_fragment and old_fragment.visible != fragment.visible:
+                self.dirty_fragments.add(fragment.id)
+                if not fragment.visible:
+                    # Remove pixmap for invisible fragments
+                    self.fragment_pixmaps.pop(fragment.id, None)
+                    self.fragment_zoom_cache.pop(fragment.id, None)
                 
         self.fragments = fragments
         self.schedule_render()

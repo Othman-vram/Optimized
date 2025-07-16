@@ -21,7 +21,7 @@ class Fragment:
     # Position and transformation
     x: float = 0.0
     y: float = 0.0
-    rotation: int = 0  # 0, 90, 180, 270 degrees
+    rotation: float = 0.0  # Any angle in degrees
     flip_horizontal: bool = False
     flip_vertical: bool = False
     
@@ -61,10 +61,9 @@ class Fragment:
         if self.flip_vertical:
             img = np.flipud(img)
             
-        # Apply rotation
-        if self.rotation != 0:
-            k = self.rotation // 90
-            img = np.rot90(img, k)
+        # Apply rotation (any angle)
+        if abs(self.rotation) > 0.01:  # Only rotate if angle is significant
+            img = self._rotate_image(img, self.rotation)
             
         # Cache the result
         self.transformed_image_cache = img
@@ -74,6 +73,46 @@ class Fragment:
         self.image_data = img
             
         return img
+        
+    def _rotate_image(self, image: np.ndarray, angle: float) -> np.ndarray:
+        """Rotate image by arbitrary angle"""
+        if abs(angle) < 0.01:
+            return image
+            
+        height, width = image.shape[:2]
+        center = (width // 2, height // 2)
+        
+        # Get rotation matrix
+        rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        
+        # Calculate new bounding box
+        cos_val = abs(rotation_matrix[0, 0])
+        sin_val = abs(rotation_matrix[0, 1])
+        new_width = int((height * sin_val) + (width * cos_val))
+        new_height = int((height * cos_val) + (width * sin_val))
+        
+        # Adjust rotation matrix for new center
+        rotation_matrix[0, 2] += (new_width / 2) - center[0]
+        rotation_matrix[1, 2] += (new_height / 2) - center[1]
+        
+        # Apply rotation with proper interpolation and border handling
+        if len(image.shape) == 3 and image.shape[2] == 4:
+            # Handle RGBA images properly
+            rotated = cv2.warpAffine(
+                image, rotation_matrix, (new_width, new_height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0, 0)  # Transparent background
+            )
+        else:
+            rotated = cv2.warpAffine(
+                image, rotation_matrix, (new_width, new_height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0)
+            )
+            
+        return rotated
         
     def invalidate_cache(self):
         """Invalidate the transformed image cache"""
@@ -98,7 +137,7 @@ class Fragment:
     
     def reset_transform(self):
         """Reset all transformations to default"""
-        self.rotation = 0
+        self.rotation = 0.0
         self.flip_horizontal = False
         self.flip_vertical = False
         self.invalidate_cache()

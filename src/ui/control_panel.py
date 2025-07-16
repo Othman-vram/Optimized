@@ -86,8 +86,32 @@ class ControlPanel(QWidget):
         
         layout.addLayout(rotation_layout, 0, 1)
         
+        # Free rotation control
+        layout.addWidget(QLabel("Angle:"), 1, 0)
+        
+        angle_layout = QHBoxLayout()
+        self.angle_spinbox = QDoubleSpinBox()
+        self.angle_spinbox.setRange(-360.0, 360.0)
+        self.angle_spinbox.setDecimals(1)
+        self.angle_spinbox.setSuffix("°")
+        self.angle_spinbox.valueChanged.connect(self.on_angle_changed)
+        angle_layout.addWidget(self.angle_spinbox)
+        
+        # Quick angle buttons
+        angle_45_btn = QPushButton("45°")
+        angle_45_btn.setToolTip("Rotate 45 degrees")
+        angle_45_btn.clicked.connect(lambda: self.request_transform('rotate_angle', 45))
+        angle_layout.addWidget(angle_45_btn)
+        
+        angle_neg45_btn = QPushButton("-45°")
+        angle_neg45_btn.setToolTip("Rotate -45 degrees")
+        angle_neg45_btn.clicked.connect(lambda: self.request_transform('rotate_angle', -45))
+        angle_layout.addWidget(angle_neg45_btn)
+        
+        layout.addLayout(angle_layout, 1, 1)
+        
         # Flip controls
-        layout.addWidget(QLabel("Flip:"), 1, 0)
+        layout.addWidget(QLabel("Flip:"), 2, 0)
         
         flip_layout = QHBoxLayout()
         self.flip_h_btn = QPushButton("↔ Horizontal")
@@ -100,13 +124,13 @@ class ControlPanel(QWidget):
         self.flip_v_btn.clicked.connect(lambda: self.request_transform('flip_vertical'))
         flip_layout.addWidget(self.flip_v_btn)
         
-        layout.addLayout(flip_layout, 1, 1)
+        layout.addLayout(flip_layout, 2, 1)
         
         # Reset button
         self.reset_btn = QPushButton("Reset All Transforms")
         self.reset_btn.setStyleSheet("QPushButton { background-color: #d32f2f; }")
         self.reset_btn.clicked.connect(self.request_reset)
-        layout.addWidget(self.reset_btn, 2, 0, 1, 2)
+        layout.addWidget(self.reset_btn, 3, 0, 1, 2)
         
     def setup_position_group(self):
         """Setup position controls"""
@@ -217,6 +241,11 @@ class ControlPanel(QWidget):
         self.x_spinbox.blockSignals(False)
         self.y_spinbox.blockSignals(False)
         
+        # Update angle control
+        self.angle_spinbox.blockSignals(True)
+        self.angle_spinbox.setValue(fragment.rotation)
+        self.angle_spinbox.blockSignals(False)
+        
         # Update display controls
         self.visible_checkbox.blockSignals(True)
         self.visible_checkbox.setChecked(fragment.visible)
@@ -278,3 +307,9 @@ class ControlPanel(QWidget):
             opacity = value / 100.0
             self.current_fragment.opacity = opacity
             self.opacity_label.setText(f"{value}%")
+            
+    def on_angle_changed(self):
+        """Handle angle spinbox changes"""
+        if self.current_fragment:
+            new_angle = self.angle_spinbox.value()
+            self.request_transform('set_rotation', new_angle)
