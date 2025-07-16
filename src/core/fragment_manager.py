@@ -139,20 +139,16 @@ class FragmentManager(QObject):
         """Set complete fragment transformation"""
         fragment = self._fragments.get(fragment_id)
         if fragment:
-            needs_cache_invalidation = False
             if rotation is not None:
                 fragment.rotation = rotation % 360
-                needs_cache_invalidation = True
             if translation is not None:
                 fragment.x, fragment.y = translation
             if flip_horizontal is not None:
                 fragment.flip_horizontal = flip_horizontal
-                needs_cache_invalidation = True
             if flip_vertical is not None:
                 fragment.flip_vertical = flip_vertical
-                needs_cache_invalidation = True
-            if needs_cache_invalidation:
-                fragment.invalidate_cache()
+            # Always invalidate cache when any transform is set
+            fragment.invalidate_cache()
             self.fragments_changed.emit()
     
     def reset_fragment_transform(self, fragment_id: str):

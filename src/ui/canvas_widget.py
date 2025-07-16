@@ -3,18 +3,83 @@ High-performance canvas widget for tissue fragment visualization
 """
 
 import numpy as np
-from typing import List, Optional, Tuple
-from PyQt6.QtWidgets import QWidget, QVBoxLayout
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QRect
-from PyQt6.QtGui import (QPainter, QPixmap,QImage, QPen, QBrush, QColor, 
-                        QMouseEvent, QWheelEvent, QPaintEvent, QResizeEvent)
+from typing import List, Optional, Tuple, Dict
+from PyQt6.QtWidgets import QWidget
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QRect, QThread, QObject
+from PyQt6.QtGui import (QPainter, QPixmap, QImage, QPen, QBrush, QColor, 
+                        QMouseEvent, QWheelEvent, QPaintEvent, QResizeEvent, QTransform)
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 import cv2
 
 from ..core.fragment import Fragment
 
-class CanvasWidget(QOpenGLWidget):
-    """High-performance OpenGL canvas for tissue fragment display"""
+class FragmentRenderer(QObject):
+    """Background fragment renderer for better performance"""
+    
+    rendering_finished = pyqtSignal(str, QPixmap)  # fragment_id, pixmap
+    
+    def __init__(self):
+        super().__init__()
+        self.render_queue = []
+        
+    def render_fragment(self, fragment: Fragment, zoom: float):
+        """Render a single fragment at the given zoom level"""
+        if fragment.image_data is None:
+            return
+            
+        transformed_image = fragment.get_transformed_image()
+        if transformed_image is None:
+            return
+            
+        # Apply level-of-detail based on zoom
+        if zoom < 0.25:
+            # Very low zoom - use 1/4 resolution
+            scale_factor = 0.25
+        elif zoom < 0.5:
+            # Low zoom - use 1/2 resolution
+            scale_factor = 0.5
+        elif zoom > 4.0:
+            # High zoom - use full resolution
+            scale_factor = 1.0
+        else:
+            # Normal zoom - use full resolution
+            scale_factor = 1.0
+            
+        # Resize if needed for LOD
+        if scale_factor < 1.0:
+            new_height = int(transformed_image.shape[0] * scale_factor)
+            new_width = int(transformed_image.shape[1] * scale_factor)
+            if new_height > 0 and new_width > 0:
+                transformed_image = cv2.resize(transformed_image, (new_width, new_height), 
+                                             interpolation=cv2.INTER_AREA)
+        
+        # Convert to QPixmap
+        height, width = transformed_image.shape[:2]
+        if len(transformed_image.shape) == 3 and transformed_image.shape[2] == 4:
+            # RGBA
+            bytes_per_line = 4 * width
+            q_image = QImage(transformed_image.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888)
+        else:
+            # Fallback to RGB
+            if len(transformed_image.shape) == 3:
+                bytes_per_line = 3 * width
+                q_image = QImage(transformed_image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            else:
+                return
+                
+        pixmap = QPixmap.fromImage(q_image)
+        
+        # Scale back up if we used LOD
+        if scale_factor < 1.0:
+            original_size = fragment.get_transformed_image().shape[:2]
+            pixmap = pixmap.scaled(original_size[1], original_size[0], 
+                                 Qt.AspectRatioMode.IgnoreAspectRatio, 
+                                 Qt.TransformationMode.FastTransformation)
+        
+        self.rendering_finished.emit(fragment.id, pixmap)
+
+class CanvasWidget(QWidget):
+    """Optimized canvas for tissue fragment display"""
     
     fragment_selected = pyqtSignal(str)  # fragment_id
     fragment_moved = pyqtSignal(str, float, float)  # fragment_id, x, y
@@ -39,240 +104,275 @@ class CanvasWidget(QOpenGLWidget):
         self.dragged_fragment_id: Optional[str] = None
         self.drag_offset = QPoint()
         
-        # Rendering
-        self.composite_pixmap: Optional[QPixmap] = None
-        self.cached_composite: Optional[QPixmap] = None
-        self.low_quality_composite: Optional[QPixmap] = None
-        self.needs_redraw = True
-        self.needs_full_redraw = True
-        self.dirty_regions = set()
+        # Fragment rendering cache
+        self.fragment_pixmaps: Dict[str, QPixmap] = {}
+        self.fragment_zoom_cache: Dict[str, float] = {}
+        self.dirty_fragments: set = set()
         
         # Performance settings
-        self.high_quality_mode = True
-        self.lod_threshold = 0.5  # Use LOD when zoom < 0.5
+        self.use_lod = True
+        self.lod_threshold = 0.5
+        self.max_texture_size = 4096
         
-        # Performance timers
+        # Rendering optimization
+        self.background_color = QColor(42, 42, 42)
+        self.selection_color = QColor(74, 144, 226)
+        self.selection_pen_width = 2.0
+        
+        # Update timers
+        self.fast_update_timer = QTimer()
+        self.fast_update_timer.setSingleShot(True)
+        self.fast_update_timer.timeout.connect(self.update)
+        
         self.render_timer = QTimer()
         self.render_timer.setSingleShot(True)
-        self.render_timer.timeout.connect(self.update_canvas)
+        self.render_timer.timeout.connect(self.render_dirty_fragments)
         
-        self.fast_render_timer = QTimer()
-        self.fast_render_timer.setSingleShot(True)
-        self.fast_render_timer.timeout.connect(self.fast_update_canvas)
-        
-        # Background rendering
-        from PyQt6.QtCore import QThread, QMutex
-        self.render_mutex = QMutex()
-        self.background_render_thread = None
+        # Background renderer
+        self.renderer = FragmentRenderer()
+        self.renderer.rendering_finished.connect(self.on_fragment_rendered)
         
         # Setup
         self.setMinimumSize(400, 300)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         
+        # Enable double buffering
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        
     def update_fragments(self, fragments: List[Fragment]):
-        """Update the fragment list and trigger redraw"""
+        """Update the fragment list and mark for re-rendering"""
+        # Find which fragments are new or changed
+        old_fragment_ids = set(f.id for f in self.fragments)
+        new_fragment_ids = set(f.id for f in fragments)
+        
+        # Remove pixmaps for deleted fragments
+        for fragment_id in old_fragment_ids - new_fragment_ids:
+            self.fragment_pixmaps.pop(fragment_id, None)
+            self.fragment_zoom_cache.pop(fragment_id, None)
+            
+        # Mark new or potentially changed fragments as dirty
+        for fragment in fragments:
+            if (fragment.id not in old_fragment_ids or 
+                not fragment.cache_valid or
+                fragment.id in self.dirty_fragments):
+                self.dirty_fragments.add(fragment.id)
+                
         self.fragments = fragments
-        self.needs_redraw = True
-        self.needs_full_redraw = True
-        self.cached_composite = None
-        self.dirty_regions.clear()
-        self.schedule_redraw()
+        self.schedule_render()
         
     def set_selected_fragment(self, fragment_id: Optional[str]):
         """Set the selected fragment"""
-        self.selected_fragment_id = fragment_id
-        self.needs_redraw = True
-        self.schedule_redraw()
-        
-    def schedule_redraw(self, fast: bool = False):
-        """Schedule a canvas redraw with debouncing"""
-        if fast and self.is_dragging_fragment:
-            # Fast rendering during drag operations
-            if not self.fast_render_timer.isActive():
-                self.fast_render_timer.start(8)  # ~120 FPS for responsiveness
+        if self.selected_fragment_id != fragment_id:
+            self.selected_fragment_id = fragment_id
+            self.update()  # Just update display, no re-rendering needed
+            
+    def schedule_render(self, fast: bool = False):
+        """Schedule fragment rendering"""
+        if fast and (self.is_dragging_fragment or self.is_panning):
+            # Fast update during interaction
+            if not self.fast_update_timer.isActive():
+                self.fast_update_timer.start(16)  # ~60 FPS
         else:
             # Normal rendering
             if not self.render_timer.isActive():
-                self.render_timer.start(33)  # 30 FPS for better performance
+                self.render_timer.start(50)  # 20 FPS for rendering
                 
-    def fast_update_canvas(self):
-        """Fast update for interactive operations"""
-        if self.is_dragging_fragment:
-            self.render_low_quality_composite()
-        self.update()
-            
-    def update_canvas(self):
-        """Update the canvas rendering"""
-        if self.needs_redraw:
-            if self.needs_full_redraw or not self.cached_composite:
-                self.render_composite()
-                self.needs_full_redraw = False
-            else:
-                self.update_dirty_regions()
-            self.needs_redraw = False
-        self.update()
-        
-    def render_composite(self):
-        """Render all fragments into a composite image"""
-        if not self.fragments:
-            self.composite_pixmap = None
+    def render_dirty_fragments(self):
+        """Render fragments that need updating"""
+        if not self.dirty_fragments:
             return
             
-        # Calculate canvas bounds
-        canvas_bounds = self.calculate_canvas_bounds()
-        if not canvas_bounds:
+        # Render fragments that need updating
+        for fragment_id in list(self.dirty_fragments):
+            fragment = self.get_fragment_by_id(fragment_id)
+            if fragment and fragment.visible:
+                self.render_fragment_pixmap(fragment)
+                
+        self.dirty_fragments.clear()
+        self.update()
+        
+    def render_fragment_pixmap(self, fragment: Fragment):
+        """Render a single fragment to a pixmap"""
+        if fragment.image_data is None:
             return
             
-        min_x, min_y, max_x, max_y = canvas_bounds
-        canvas_width = int(max_x - min_x)
-        canvas_height = int(max_y - min_y)
-        
-        # Create composite image with alpha channel
-        composite = np.zeros((canvas_height, canvas_width, 4), dtype=np.uint8)
-        
-        # Render each visible fragment
-        for fragment in self.fragments:
-            if not fragment.visible or fragment.image_data is None:
-                continue
-                
-            self.render_fragment_to_composite(fragment, composite, min_x, min_y)
-            
-        # Convert to QPixmap
-        height, width, channel = composite.shape
-        bytes_per_line = 4 * width
-        q_image = QPixmap.fromImage(
-            QImage(composite.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888)
-        )
-        self.composite_pixmap = q_image
-        
-    def render_fragment_to_composite(self, fragment: Fragment, composite: np.ndarray, 
-                                   offset_x: float, offset_y: float):
-        """Render a single fragment to the composite image"""
         transformed_image = fragment.get_transformed_image()
         if transformed_image is None:
             return
             
-        # Calculate position in composite
-        frag_x = int(fragment.x - offset_x)
-        frag_y = int(fragment.y - offset_y)
+        # Check if we need to re-render based on zoom level
+        current_zoom_level = self.get_zoom_level()
+        cached_zoom = self.fragment_zoom_cache.get(fragment.id, -1)
         
-        # Get fragment dimensions
-        frag_h, frag_w = transformed_image.shape[:2]
-        comp_h, comp_w = composite.shape[:2]
+        if (fragment.id in self.fragment_pixmaps and 
+            abs(current_zoom_level - cached_zoom) < 0.1):
+            return  # Use cached version
+            
+        # Apply level-of-detail
+        render_image = self.apply_lod(transformed_image, self.zoom)
         
-        # Calculate intersection with composite bounds
-        src_x1 = max(0, -frag_x)
-        src_y1 = max(0, -frag_y)
-        src_x2 = min(frag_w, comp_w - frag_x)
-        src_y2 = min(frag_h, comp_h - frag_y)
+        # Convert to QPixmap efficiently
+        pixmap = self.numpy_to_pixmap(render_image)
+        if pixmap:
+            self.fragment_pixmaps[fragment.id] = pixmap
+            self.fragment_zoom_cache[fragment.id] = current_zoom_level
+            
+    def apply_lod(self, image: np.ndarray, zoom: float) -> np.ndarray:
+        """Apply level-of-detail scaling"""
+        if not self.use_lod or zoom >= self.lod_threshold:
+            return image
+            
+        # Calculate appropriate scale factor
+        if zoom < 0.1:
+            scale = 0.25
+        elif zoom < 0.25:
+            scale = 0.5
+        else:
+            scale = 0.75
+            
+        height, width = image.shape[:2]
+        new_height = max(1, int(height * scale))
+        new_width = max(1, int(width * scale))
         
-        dst_x1 = max(0, frag_x)
-        dst_y1 = max(0, frag_y)
-        dst_x2 = dst_x1 + (src_x2 - src_x1)
-        dst_y2 = dst_y1 + (src_y2 - src_y1)
+        return cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
         
-        # Check if there's any overlap
-        if src_x2 <= src_x1 or src_y2 <= src_y1:
-            return
-            
-        # Extract the overlapping region
-        fragment_region = transformed_image[src_y1:src_y2, src_x1:src_x2]
-        
-        # Ensure we have the right number of channels
-        if len(fragment_region.shape) != 3:
-            return
-            
-        # Alpha blending with proper transparency support
-        if fragment_region.shape[2] == 4:  # RGBA
-            # Extract alpha channel from fragment
-            frag_alpha = fragment_region[:, :, 3:4] / 255.0 * fragment.opacity
-            frag_rgb = fragment_region[:, :, :3]
-            
-            # Get existing composite region
-            comp_region = composite[dst_y1:dst_y2, dst_x1:dst_x2]
-            comp_alpha = comp_region[:, :, 3:4] / 255.0
-            comp_rgb = comp_region[:, :, :3]
-            
-            # Alpha blending formula: C = αA*A + (1-αA)*αB*B / (αA + (1-αA)*αB)
-            # Simplified for overlay: C = αA*A + (1-αA)*B
-            out_alpha = frag_alpha + (1 - frag_alpha) * comp_alpha
-            
-            # Avoid division by zero
-            mask = out_alpha[:, :, 0] > 0
-            out_rgb = np.zeros_like(frag_rgb, dtype=np.float32)
-            out_rgb[mask, :] = (frag_alpha[mask, :] * frag_rgb[mask, :] + 
-                               (1 - frag_alpha[mask, :]) * comp_rgb[mask, :])
-            
-            # Update composite
-            composite[dst_y1:dst_y2, dst_x1:dst_x2, :3] = np.clip(out_rgb, 0, 255).astype(np.uint8)
-            composite[dst_y1:dst_y2, dst_x1:dst_x2, 3:4] = np.clip(out_alpha * 255, 0, 255).astype(np.uint8)
-        elif fragment_region.shape[2] == 3:
-            # Fallback for RGB images (shouldn't happen with new loader)
-            alpha = fragment.opacity
-            composite[dst_y1:dst_y2, dst_x1:dst_x2, :3] = (
-                alpha * fragment_region + 
-                (1 - alpha) * composite[dst_y1:dst_y2, dst_x1:dst_x2, :3]
-            ).astype(np.uint8)
-            composite[dst_y1:dst_y2, dst_x1:dst_x2, 3] = 255  # Full alpha
-            
-    def calculate_canvas_bounds(self) -> Optional[Tuple[float, float, float, float]]:
-        """Calculate the bounding box of all visible fragments"""
-        visible_fragments = [f for f in self.fragments if f.visible and f.image_data is not None]
-        if not visible_fragments:
+    def numpy_to_pixmap(self, image: np.ndarray) -> Optional[QPixmap]:
+        """Convert numpy array to QPixmap efficiently"""
+        if image is None or image.size == 0:
             return None
             
-        min_x = min_y = float('inf')
-        max_x = max_y = float('-inf')
+        height, width = image.shape[:2]
         
-        for fragment in visible_fragments:
-            bbox = fragment.get_bounding_box()
-            min_x = min(min_x, bbox[0])
-            min_y = min(min_y, bbox[1])
-            max_x = max(max_x, bbox[0] + bbox[2])
-            max_y = max(max_y, bbox[1] + bbox[3])
+        # Ensure image is in the right format
+        if len(image.shape) == 3:
+            if image.shape[2] == 4:  # RGBA
+                bytes_per_line = 4 * width
+                format = QImage.Format.Format_RGBA8888
+            elif image.shape[2] == 3:  # RGB
+                bytes_per_line = 3 * width
+                format = QImage.Format.Format_RGB888
+            else:
+                return None
+        else:
+            return None
             
-        return (min_x, min_y, max_x, max_y)
+        # Create QImage
+        q_image = QImage(image.data, width, height, bytes_per_line, format)
+        return QPixmap.fromImage(q_image)
+        
+    def get_zoom_level(self) -> float:
+        """Get quantized zoom level for caching"""
+        # Quantize zoom levels to reduce cache misses
+        if self.zoom < 0.1:
+            return 0.1
+        elif self.zoom < 0.25:
+            return 0.25
+        elif self.zoom < 0.5:
+            return 0.5
+        elif self.zoom < 1.0:
+            return 1.0
+        elif self.zoom < 2.0:
+            return 2.0
+        else:
+            return min(self.zoom, 10.0)
+            
+    def get_fragment_by_id(self, fragment_id: str) -> Optional[Fragment]:
+        """Get fragment by ID"""
+        for fragment in self.fragments:
+            if fragment.id == fragment_id:
+                return fragment
+        return None
+        
+    def on_fragment_rendered(self, fragment_id: str, pixmap: QPixmap):
+        """Handle completed fragment rendering"""
+        self.fragment_pixmaps[fragment_id] = pixmap
+        self.update()
         
     def paintEvent(self, event: QPaintEvent):
-        """Paint the canvas"""
+        """Paint the canvas with optimized rendering"""
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)  # Disable for performance
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.zoom > 2.0)
         
         # Fill background
-        painter.fillRect(self.rect(), QColor(42, 42, 42))
+        painter.fillRect(self.rect(), self.background_color)
         
-        if self.composite_pixmap is None:
+        if not self.fragments:
             return
             
-        # Apply viewport transformation
+        # Set up viewport transformation
         painter.save()
         painter.scale(self.zoom, self.zoom)
         painter.translate(self.pan_x, self.pan_y)
         
-        # Draw composite image
-        canvas_bounds = self.calculate_canvas_bounds()
-        if canvas_bounds:
-            min_x, min_y, _, _ = canvas_bounds
-            painter.drawPixmap(int(min_x), int(min_y), self.composite_pixmap)
+        # Get visible area for culling
+        visible_rect = self.get_visible_world_rect()
+        
+        # Draw fragments
+        for fragment in self.fragments:
+            if not fragment.visible:
+                continue
+                
+            # Frustum culling
+            if not self.fragment_intersects_rect(fragment, visible_rect):
+                continue
+                
+            self.draw_fragment(painter, fragment)
             
         # Draw selection outlines
         self.draw_selection_outlines(painter)
         
         painter.restore()
         
+    def get_visible_world_rect(self) -> QRect:
+        """Get the visible world rectangle for culling"""
+        # Convert screen rect to world coordinates
+        screen_rect = self.rect()
+        
+        top_left = self.screen_to_world(screen_rect.topLeft())
+        bottom_right = self.screen_to_world(screen_rect.bottomRight())
+        
+        return QRect(top_left, bottom_right)
+        
+    def fragment_intersects_rect(self, fragment: Fragment, rect: QRect) -> bool:
+        """Check if fragment intersects with the given rectangle"""
+        bbox = fragment.get_bounding_box()
+        frag_rect = QRect(int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+        return frag_rect.intersects(rect)
+        
+    def draw_fragment(self, painter: QPainter, fragment: Fragment):
+        """Draw a single fragment"""
+        pixmap = self.fragment_pixmaps.get(fragment.id)
+        if not pixmap:
+            # Fragment not rendered yet, mark as dirty and use placeholder
+            self.dirty_fragments.add(fragment.id)
+            self.schedule_render()
+            return
+            
+        # Apply opacity
+        if fragment.opacity < 1.0:
+            painter.setOpacity(fragment.opacity)
+            
+        # Draw the pixmap
+        painter.drawPixmap(int(fragment.x), int(fragment.y), pixmap)
+        
+        # Reset opacity
+        if fragment.opacity < 1.0:
+            painter.setOpacity(1.0)
+            
     def draw_selection_outlines(self, painter: QPainter):
         """Draw selection outlines for fragments"""
+        pen = QPen(self.selection_color, self.selection_pen_width / self.zoom)
+        painter.setPen(pen)
+        painter.setBrush(QBrush())
+        
         for fragment in self.fragments:
-            if not fragment.visible or fragment.image_data is None:
+            if not fragment.visible:
                 continue
                 
-            # Draw selection outline
             if fragment.selected or fragment.id == self.selected_fragment_id:
-                pen = QPen(QColor(74, 144, 226), 2.0 / self.zoom)
-                painter.setPen(pen)
-                painter.setBrush(QBrush())
-                
                 bbox = fragment.get_bounding_box()
                 rect = QRect(int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
                 painter.drawRect(rect)
@@ -311,6 +411,7 @@ class CanvasWidget(QOpenGLWidget):
             new_y = world_pos.y() - self.drag_offset.y()
             
             self.fragment_moved.emit(self.dragged_fragment_id, new_x, new_y)
+            self.schedule_render(fast=True)
             
         elif self.is_panning:
             # Pan viewport
@@ -318,7 +419,7 @@ class CanvasWidget(QOpenGLWidget):
             self.pan_x += delta.x() / self.zoom
             self.pan_y += delta.y() / self.zoom
             self.viewport_changed.emit(self.zoom, self.pan_x, self.pan_y)
-            self.schedule_redraw()
+            self.update()  # Fast update for panning
             
         self.last_mouse_pos = event.pos()
         
@@ -339,26 +440,28 @@ class CanvasWidget(QOpenGLWidget):
         
         if new_zoom != self.zoom:
             # Update zoom
+            old_zoom_level = self.get_zoom_level()
             self.zoom = new_zoom
+            new_zoom_level = self.get_zoom_level()
             
             # Adjust pan to keep mouse position fixed
             mouse_world_after = self.screen_to_world(event.position().toPoint())
             self.pan_x += mouse_world_before.x() - mouse_world_after.x()
             self.pan_y += mouse_world_before.y() - mouse_world_after.y()
             
-            # Invalidate cache on zoom change
-            self.needs_full_redraw = True
-            self.cached_composite = None
+            # Mark fragments dirty if zoom level changed significantly
+            if abs(old_zoom_level - new_zoom_level) > 0.1:
+                self.dirty_fragments.update(f.id for f in self.fragments if f.visible)
+                self.schedule_render()
+            else:
+                self.update()  # Just redraw existing pixmaps
             
             self.viewport_changed.emit(self.zoom, self.pan_x, self.pan_y)
-            self.schedule_redraw()
             
     def resizeEvent(self, event: QResizeEvent):
         """Handle resize events"""
         super().resizeEvent(event)
-        self.needs_full_redraw = True
-        self.cached_composite = None
-        self.schedule_redraw()
+        self.update()
         
     def screen_to_world(self, screen_pos: QPoint) -> QPoint:
         """Convert screen coordinates to world coordinates"""
@@ -382,11 +485,21 @@ class CanvasWidget(QOpenGLWidget):
         
     def zoom_to_fit(self):
         """Zoom to fit all visible fragments"""
-        canvas_bounds = self.calculate_canvas_bounds()
-        if not canvas_bounds:
+        visible_fragments = [f for f in self.fragments if f.visible and f.image_data is not None]
+        if not visible_fragments:
             return
             
-        min_x, min_y, max_x, max_y = canvas_bounds
+        # Calculate bounds
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+        
+        for fragment in visible_fragments:
+            bbox = fragment.get_bounding_box()
+            min_x = min(min_x, bbox[0])
+            min_y = min(min_y, bbox[1])
+            max_x = max(max_x, bbox[0] + bbox[2])
+            max_y = max(max_y, bbox[1] + bbox[3])
+            
         content_width = max_x - min_x
         content_height = max_y - min_y
         
@@ -408,21 +521,34 @@ class CanvasWidget(QOpenGLWidget):
         self.pan_x = (widget_width / 2 / self.zoom) - content_center_x
         self.pan_y = (widget_height / 2 / self.zoom) - content_center_y
         
+        # Mark all fragments as dirty for new zoom level
+        self.dirty_fragments.update(f.id for f in self.fragments if f.visible)
+        
         self.viewport_changed.emit(self.zoom, self.pan_x, self.pan_y)
-        self.schedule_redraw()
+        self.schedule_render()
         
     def zoom_to_100(self):
         """Reset zoom to 100%"""
         self.zoom = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
-        self.viewport_changed.emit(self.zoom, self.pan_x, self.pan_y)
-        self.schedule_redraw()
         
-    def export_view(self) -> QPixmap:
-        """Export the current view as a pixmap"""
-        pixmap = QPixmap(self.size())
-        painter = QPainter(pixmap)
-        self.render(painter)
-        painter.end()
-        return pixmap
+        # Mark all fragments as dirty for new zoom level
+        self.dirty_fragments.update(f.id for f in self.fragments if f.visible)
+        
+        self.viewport_changed.emit(self.zoom, self.pan_x, self.pan_y)
+        self.schedule_render()
+        
+    def invalidate_fragment(self, fragment_id: str):
+        """Mark a fragment as needing re-rendering"""
+        self.dirty_fragments.add(fragment_id)
+        self.fragment_pixmaps.pop(fragment_id, None)
+        self.fragment_zoom_cache.pop(fragment_id, None)
+        self.schedule_render()
+        
+    def clear_cache(self):
+        """Clear all cached pixmaps"""
+        self.fragment_pixmaps.clear()
+        self.fragment_zoom_cache.clear()
+        self.dirty_fragments.update(f.id for f in self.fragments if f.visible)
+        self.schedule_render()

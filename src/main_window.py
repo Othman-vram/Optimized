@@ -106,6 +106,12 @@ class MainWindow(QMainWindow):
         
         # Fragment manager connections
         self.fragment_manager.fragments_changed.connect(self.update_ui)
+        self.fragment_manager.fragments_changed.connect(self.on_fragments_changed)
+        
+    def on_fragments_changed(self):
+        """Handle fragment changes and update canvas efficiently"""
+        # Update canvas with new fragment data
+        self.canvas_widget.update_fragments(self.fragment_manager.get_all_fragments())
         
     def setup_menu_bar(self):
         """Setup the menu bar"""
