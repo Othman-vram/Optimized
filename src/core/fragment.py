@@ -44,7 +44,7 @@ class Fragment:
     
     def get_transformed_image(self) -> np.ndarray:
         """Get the image with current transformations applied"""
-        if self.image_data is None:
+        if self.original_image_data is None:
             return None
             
         # Check if cache is valid
@@ -69,6 +69,9 @@ class Fragment:
         # Cache the result
         self.transformed_image_cache = img
         self.cache_valid = True
+        
+        # Also update the main image_data for compatibility
+        self.image_data = img
             
         return img
         

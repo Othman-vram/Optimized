@@ -179,6 +179,10 @@ class CanvasWidget(QOpenGLWidget):
         # Extract the overlapping region
         fragment_region = transformed_image[src_y1:src_y2, src_x1:src_x2]
         
+        # Ensure we have the right number of channels
+        if len(fragment_region.shape) != 3:
+            return
+            
         # Alpha blending with proper transparency support
         if fragment_region.shape[2] == 4:  # RGBA
             # Extract alpha channel from fragment
@@ -203,7 +207,7 @@ class CanvasWidget(QOpenGLWidget):
             # Update composite
             composite[dst_y1:dst_y2, dst_x1:dst_x2, :3] = np.clip(out_rgb, 0, 255).astype(np.uint8)
             composite[dst_y1:dst_y2, dst_x1:dst_x2, 3:4] = np.clip(out_alpha * 255, 0, 255).astype(np.uint8)
-        else:
+        elif fragment_region.shape[2] == 3:
             # Fallback for RGB images (shouldn't happen with new loader)
             alpha = fragment.opacity
             composite[dst_y1:dst_y2, dst_x1:dst_x2, :3] = (
