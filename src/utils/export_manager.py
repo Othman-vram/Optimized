@@ -137,11 +137,20 @@ class ExportManager:
         # Extract region
         fragment_region = transformed_image[src_y1:src_y2, src_x1:src_x2]
         
-        # Simple but correct alpha blending
+        # Proper alpha compositing - place fragments exactly where they are positioned
         if fragment_region.shape[2] == 4:  # RGBA
-            # Simple alpha blending - just place fragment where alpha > 0
-            alpha_mask = fragment_region[:, :, 3] > 0
-            composite[dst_y1:dst_y2, dst_x1:dst_x2][alpha_mask] = fragment_region[alpha_mask]
+            # Get alpha channel
+            alpha = fragment_region[:, :, 3:4] / 255.0
+            
+            # Get existing composite region
+            composite_region = composite[dst_y1:dst_y2, dst_x1:dst_x2]
+            
+            # Alpha blend: result = alpha * foreground + (1 - alpha) * background
+            blended = (alpha * fragment_region + (1 - alpha) * composite_region).astype(np.uint8)
+            
+            # Only update pixels where fragment has content (alpha > 0)
+            mask = fragment_region[:, :, 3] > 0
+            composite[dst_y1:dst_y2, dst_x1:dst_x2][mask] = blended[mask]
         else:
             # RGB images - direct copy
             composite[dst_y1:dst_y2, dst_x1:dst_x2, :3] = fragment_region

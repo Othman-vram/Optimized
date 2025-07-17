@@ -441,8 +441,11 @@ class CanvasWidget(QWidget):
         
     def wheelEvent(self, event: QWheelEvent):
         """Handle mouse wheel events for zooming"""
+        # Get mouse position in screen coordinates
+        mouse_screen_pos = event.position().toPoint()
+        
         # Get mouse position in world coordinates before zoom
-        mouse_world_before = self.screen_to_world(event.position().toPoint())
+        mouse_world_before = self.screen_to_world(mouse_screen_pos)
         
         # Calculate zoom factor
         zoom_factor = 1.2 if event.angleDelta().y() > 0 else 1.0 / 1.2
@@ -454,10 +457,14 @@ class CanvasWidget(QWidget):
             self.zoom = new_zoom
             new_zoom_level = self.get_zoom_level()
             
-            # Adjust pan to keep mouse position fixed
-            mouse_world_after = self.screen_to_world(event.position().toPoint())
-            self.pan_x += mouse_world_before.x() - mouse_world_after.x()
-            self.pan_y += mouse_world_before.y() - mouse_world_after.y()
+            # Adjust pan to keep mouse position fixed in world coordinates
+            # Calculate what the world position would be after zoom change
+            new_world_x = (mouse_screen_pos.x() / self.zoom) - self.pan_x
+            new_world_y = (mouse_screen_pos.y() / self.zoom) - self.pan_y
+            
+            # Adjust pan so the world position under mouse stays the same
+            self.pan_x += mouse_world_before.x() - new_world_x
+            self.pan_y += mouse_world_before.y() - new_world_y
             
             # Mark fragments dirty if zoom level changed significantly
             if abs(old_zoom_level - new_zoom_level) > 0.1:
