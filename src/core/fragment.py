@@ -121,20 +121,77 @@ class Fragment:
         self.transformed_image_cache = None
     
     def get_bounding_box(self) -> Tuple[float, float, float, float]:
-        """Get the bounding box of the transformed fragment (x, y, width, height)"""
+        """Get the tight bounding box of the actual tissue content (x, y, width, height)"""
         if self.image_data is None:
             return (self.x, self.y, 0, 0)
             
         transformed_img = self.get_transformed_image()
-        height, width = transformed_img.shape[:2]
+        if transformed_img is None:
+            return (self.x, self.y, 0, 0)
+            
+        # Find the actual content bounds by looking for non-transparent pixels
+        content_bounds = self._find_content_bounds(transformed_img)
+        if content_bounds is None:
+            height, width = transformed_img.shape[:2]
+            return (self.x, self.y, width, height)
+            
+        min_x, min_y, max_x, max_y = content_bounds
+        content_width = max_x - min_x
+        content_height = max_y - min_y
         
-        return (self.x, self.y, width, height)
+        # Adjust position based on content offset
+        actual_x = self.x + min_x
+        actual_y = self.y + min_y
+        
+        return (actual_x, actual_y, content_width, content_height)
+    
+    def _find_content_bounds(self, image: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """Find the bounding box of non-transparent content in the image"""
+        if image is None or image.size == 0:
+            return None
+            
+        # Handle different image formats
+        if len(image.shape) == 3:
+            if image.shape[2] == 4:  # RGBA
+                # Use alpha channel to find content
+                alpha = image[:, :, 3]
+                mask = alpha > 0
+            else:  # RGB
+                # Find non-black pixels (assuming black is background)
+                gray = np.mean(image, axis=2)
+                mask = gray > 10  # Small threshold to handle noise
+        else:  # Grayscale
+            mask = image > 10
+            
+        # Find bounding box of content
+        rows = np.any(mask, axis=1)
+        cols = np.any(mask, axis=0)
+        
+        if not np.any(rows) or not np.any(cols):
+            return None
+            
+        min_row, max_row = np.where(rows)[0][[0, -1]]
+        min_col, max_col = np.where(cols)[0][[0, -1]]
+        
+        return (min_col, min_row, max_col + 1, max_row + 1)
     
     def contains_point(self, x: float, y: float) -> bool:
-        """Check if a point is within the fragment bounds"""
+        """Check if a point is within the actual tissue content bounds"""
         bbox_x, bbox_y, bbox_w, bbox_h = self.get_bounding_box()
         return (bbox_x <= x <= bbox_x + bbox_w and 
                 bbox_y <= y <= bbox_y + bbox_h)
+    
+    def get_full_image_bounds(self) -> Tuple[float, float, float, float]:
+        """Get the full image bounds including transparent areas (x, y, width, height)"""
+        if self.image_data is None:
+            return (self.x, self.y, 0, 0)
+            
+        transformed_img = self.get_transformed_image()
+        if transformed_img is None:
+            return (self.x, self.y, 0, 0)
+            
+        height, width = transformed_img.shape[:2]
+        return (self.x, self.y, width, height)
     
     def reset_transform(self):
         """Reset all transformations to default"""

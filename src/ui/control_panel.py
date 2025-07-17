@@ -230,7 +230,13 @@ class ControlPanel(QWidget):
         
         # Update info
         self.name_label.setText(fragment.name or f"Fragment {fragment.id[:8]}")
-        self.size_label.setText(f"Size: {fragment.original_size[0]} × {fragment.original_size[1]}")
+        
+        # Show both original size and content bounds
+        content_bbox = fragment.get_bounding_box()
+        content_size = f"{int(content_bbox[2])} × {int(content_bbox[3])}"
+        original_size = f"{fragment.original_size[0]} × {fragment.original_size[1]}"
+        self.size_label.setText(f"Content: {content_size} | Original: {original_size}")
+        
         self.file_label.setText(f"File: {fragment.file_path}")
         
         # Update position controls (block signals to prevent recursion)

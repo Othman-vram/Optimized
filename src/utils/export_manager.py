@@ -136,7 +136,7 @@ class ExportManager:
         # Extract region
         fragment_region = transformed_image[src_y1:src_y2, src_x1:src_x2]
         
-        # Alpha blending with proper transparency support
+        # Proper alpha blending that preserves positioning
         if fragment_region.shape[2] == 4:  # RGBA
             # Extract alpha channel from fragment
             frag_alpha = fragment_region[:, :, 3:4] / 255.0 * fragment.opacity
@@ -147,14 +147,17 @@ class ExportManager:
             comp_alpha = comp_region[:, :, 3:4] / 255.0
             comp_rgb = comp_region[:, :, :3]
             
-            # Alpha blending
-            out_alpha = frag_alpha + (1 - frag_alpha) * comp_alpha
+            # Proper alpha compositing (over operation)
+            out_alpha = frag_alpha + comp_alpha * (1 - frag_alpha)
             
             # Avoid division by zero
-            mask = out_alpha[:, :, 0] > 0
+            mask = out_alpha[:, :, 0] > 1e-6
             out_rgb = np.zeros_like(frag_rgb, dtype=np.float32)
-            out_rgb[mask, :] = (frag_alpha[mask, :] * frag_rgb[mask, :] + 
-                               (1 - frag_alpha[mask, :]) * comp_rgb[mask, :])
+            
+            # Only blend where there's alpha
+            if np.any(mask):
+                out_rgb[mask, :] = (frag_alpha[mask, :] * frag_rgb[mask, :] + 
+                                   comp_alpha[mask, :] * (1 - frag_alpha[mask, :]) * comp_rgb[mask, :]) / out_alpha[mask, :]
             
             # Update composite
             composite[dst_y1:dst_y2, dst_x1:dst_x2, :3] = np.clip(out_rgb, 0, 255).astype(np.uint8)
@@ -162,11 +165,6 @@ class ExportManager:
         else:
             # Fallback for RGB images
             alpha = fragment.opacity
-            composite[dst_y1:dst_y2, dst_x1:dst_x2, :3] = (
-                alpha * fragment_region + 
-                (1 - alpha) * composite[dst_y1:dst_y2, dst_x1:dst_x2, :3]
-            ).astype(np.uint8)
-            composite[dst_y1:dst_y2, dst_x1:dst_x2, 3] = 255
             
     def save_tiff(self, image: np.ndarray, output_path: str, resolution_dpi: int):
         """Save image as TIFF"""

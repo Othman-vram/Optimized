@@ -178,7 +178,7 @@ class FragmentManager(QObject):
         self.fragments_changed.emit()
     
     def get_composite_bounds(self) -> Tuple[float, float, float, float]:
-        """Get bounding box of all visible fragments (min_x, min_y, max_x, max_y)"""
+        """Get bounding box of all visible fragments using their full image bounds (min_x, min_y, max_x, max_y)"""
         if not self._fragments:
             return (0, 0, 0, 0)
             
@@ -190,7 +190,8 @@ class FragmentManager(QObject):
         max_x = max_y = float('-inf')
         
         for fragment in visible_fragments:
-            bbox_x, bbox_y, bbox_w, bbox_h = fragment.get_bounding_box()
+            # Use full image bounds for composite calculation to include all pixels
+            bbox = fragment.get_full_image_bounds()
             min_x = min(min_x, bbox_x)
             min_y = min(min_y, bbox_y)
             max_x = max(max_x, bbox_x + bbox_w)

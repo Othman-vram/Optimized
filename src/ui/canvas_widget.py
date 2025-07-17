@@ -353,7 +353,8 @@ class CanvasWidget(QWidget):
         
     def fragment_intersects_rect(self, fragment: Fragment, rect: QRect) -> bool:
         """Check if fragment intersects with the given rectangle"""
-        bbox = fragment.get_bounding_box()
+        # Use full image bounds for culling to ensure we don't miss fragments
+        bbox = fragment.get_full_image_bounds()
         frag_rect = QRect(int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
         return frag_rect.intersects(rect)
         
@@ -388,6 +389,7 @@ class CanvasWidget(QWidget):
                 continue
                 
             if fragment.selected or fragment.id == self.selected_fragment_id:
+                # Use tight content bounds for selection outline
                 bbox = fragment.get_bounding_box()
                 rect = QRect(int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
                 painter.drawRect(rect)
@@ -509,7 +511,7 @@ class CanvasWidget(QWidget):
         max_x = max_y = float('-inf')
         
         for fragment in visible_fragments:
-            bbox = fragment.get_bounding_box()
+            bbox = fragment.get_full_image_bounds()
             min_x = min(min_x, bbox[0])
             min_y = min(min_y, bbox[1])
             max_x = max(max_x, bbox[0] + bbox[2])
