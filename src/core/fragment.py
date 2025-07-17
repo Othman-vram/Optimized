@@ -19,6 +19,10 @@ class Fragment:
     transformed_image_cache: Optional[np.ndarray] = None
     cache_valid: bool = False
     
+    # Cached bounds for performance
+    _content_bounds_cache: Optional[Tuple[int, int, int, int]] = None
+    _bounds_cache_valid: bool = False
+    
     # Position and transformation
     x: float = 0.0
     y: float = 0.0
@@ -42,6 +46,7 @@ class Fragment:
             self.original_image_data = self.image_data.copy()
             self.original_size = (self.image_data.shape[1], self.image_data.shape[0])
             self.cache_valid = False
+            self._bounds_cache_valid = False
     
     def get_transformed_image(self) -> np.ndarray:
         """Get the image with current transformations applied"""
@@ -119,22 +124,37 @@ class Fragment:
         """Invalidate the transformed image cache"""
         self.cache_valid = False
         self.transformed_image_cache = None
+        self._bounds_cache_valid = False
+        self._content_bounds_cache = None
     
     def get_bounding_box(self) -> Tuple[float, float, float, float]:
         """Get the tight bounding box of the actual tissue content (x, y, width, height)"""
         if self.image_data is None:
             return (self.x, self.y, 0, 0)
             
+        # Use cached bounds if valid
+        if self._bounds_cache_valid and self._content_bounds_cache is not None:
+            min_x, min_y, max_x, max_y = self._content_bounds_cache
+            content_width = max_x - min_x
+            content_height = max_y - min_y
+            actual_x = self.x + min_x
+            actual_y = self.y + min_y
+            return (actual_x, actual_y, content_width, content_height)
+            
         transformed_img = self.get_transformed_image()
         if transformed_img is None:
             return (self.x, self.y, 0, 0)
             
         # Find the actual content bounds by looking for non-transparent pixels
-        content_bounds = self._find_content_bounds(transformed_img)
+        content_bounds = self._find_content_bounds_fast(transformed_img)
         if content_bounds is None:
             height, width = transformed_img.shape[:2]
             return (self.x, self.y, width, height)
             
+        # Cache the bounds
+        self._content_bounds_cache = content_bounds
+        self._bounds_cache_valid = True
+        
         min_x, min_y, max_x, max_y = content_bounds
         content_width = max_x - min_x
         content_height = max_y - min_y
@@ -145,8 +165,8 @@ class Fragment:
         
         return (actual_x, actual_y, content_width, content_height)
     
-    def _find_content_bounds(self, image: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-        """Find the bounding box of non-transparent content in the image"""
+    def _find_content_bounds_fast(self, image: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """Fast content bounds detection optimized for tissue images"""
         if image is None or image.size == 0:
             return None
             
@@ -155,23 +175,29 @@ class Fragment:
             if image.shape[2] == 4:  # RGBA
                 # Use alpha channel to find content
                 alpha = image[:, :, 3]
-                mask = alpha > 0
+                # For tissue images, look for non-zero alpha
+                mask = alpha > 10  # Small threshold for anti-aliasing
             else:  # RGB
-                # Find non-black pixels (assuming black is background)
-                gray = np.mean(image, axis=2)
-                mask = gray > 10  # Small threshold to handle noise
+                # For tissue images, find non-white pixels (tissue is usually colored)
+                # Convert to grayscale and look for pixels that aren't background
+                gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+                # Tissue images often have white/light backgrounds
+                mask = gray < 240  # Adjust threshold for tissue detection
         else:  # Grayscale
-            mask = image > 10
+            mask = image < 240  # Similar logic for grayscale
             
-        # Find bounding box of content
+        # Find bounding box of content using numpy operations (faster)
         rows = np.any(mask, axis=1)
         cols = np.any(mask, axis=0)
         
         if not np.any(rows) or not np.any(cols):
             return None
             
-        min_row, max_row = np.where(rows)[0][[0, -1]]
-        min_col, max_col = np.where(cols)[0][[0, -1]]
+        row_indices = np.where(rows)[0]
+        col_indices = np.where(cols)[0]
+        
+        min_row, max_row = row_indices[0], row_indices[-1]
+        min_col, max_col = col_indices[0], col_indices[-1]
         
         return (min_col, min_row, max_col + 1, max_row + 1)
     

@@ -143,36 +143,23 @@ class CanvasWidget(QWidget):
         
     def update_fragments(self, fragments: List[Fragment]):
         """Update the fragment list and mark for re-rendering"""
-        # Find which fragments are new or changed
-        old_fragment_ids = set(f.id for f in self.fragments)
-        new_fragment_ids = set(f.id for f in fragments)
-        
-        # Remove pixmaps for deleted fragments
-        for fragment_id in old_fragment_ids - new_fragment_ids:
-            self.fragment_pixmaps.pop(fragment_id, None)
-            self.fragment_zoom_cache.pop(fragment_id, None)
-            
-        # Mark new or potentially changed fragments as dirty
-        for fragment in fragments:
-            if (fragment.id not in old_fragment_ids or 
-                not fragment.cache_valid or 
-                fragment.id in self.dirty_fragments):
-                self.dirty_fragments.add(fragment.id)
-                # Remove old cached pixmap to force re-render
-                self.fragment_pixmaps.pop(fragment.id, None)
-                self.fragment_zoom_cache.pop(fragment.id, None)
-            
-            # Also mark as dirty if visibility changed
-            old_fragment = next((f for f in self.fragments if f.id == fragment.id), None)
-            if old_fragment and old_fragment.visible != fragment.visible:
-                self.dirty_fragments.add(fragment.id)
-                if not fragment.visible:
-                    # Remove pixmap for invisible fragments
-                    self.fragment_pixmaps.pop(fragment.id, None)
-                    self.fragment_zoom_cache.pop(fragment.id, None)
-                
+        # Simple update - only mark fragments as dirty if they actually changed
         self.fragments = fragments
-        self.schedule_render()
+        
+        # Only re-render if we have visible fragments and they need updating
+        visible_fragments = [f for f in fragments if f.visible]
+        if visible_fragments:
+            # Mark only invalid cache fragments as dirty
+            for fragment in visible_fragments:
+                if not fragment.cache_valid:
+                    self.dirty_fragments.add(fragment.id)
+            
+            if self.dirty_fragments:
+                self.schedule_render()
+            else:
+                self.update()  # Just redraw existing pixmaps
+        else:
+            self.update()
         
     def set_selected_fragment(self, fragment_id: Optional[str]):
         """Set the selected fragment"""
@@ -196,13 +183,19 @@ class CanvasWidget(QWidget):
         if not self.dirty_fragments:
             return
             
-        # Render fragments that need updating
-        for fragment_id in list(self.dirty_fragments):
+        # Limit rendering to avoid UI freezing
+        fragments_to_render = list(self.dirty_fragments)[:3]  # Max 3 at a time
+        
+        for fragment_id in fragments_to_render:
             fragment = self.get_fragment_by_id(fragment_id)
             if fragment and fragment.visible:
                 self.render_fragment_pixmap(fragment)
+                self.dirty_fragments.discard(fragment_id)
                 
-        self.dirty_fragments.clear()
+        # If more fragments need rendering, schedule another render
+        if self.dirty_fragments:
+            self.schedule_render()
+            
         self.update()
         
     def render_fragment_pixmap(self, fragment: Fragment):

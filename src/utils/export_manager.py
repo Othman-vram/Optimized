@@ -80,7 +80,8 @@ class ExportManager:
         max_x = max_y = float('-inf')
         
         for fragment in fragments:
-            bbox = fragment.get_bounding_box()
+            # Use full image bounds for export to preserve exact positioning
+            bbox = fragment.get_full_image_bounds()
             min_x = min(min_x, bbox[0])
             min_y = min(min_y, bbox[1])
             max_x = max(max_x, bbox[0] + bbox[2])
@@ -136,35 +137,15 @@ class ExportManager:
         # Extract region
         fragment_region = transformed_image[src_y1:src_y2, src_x1:src_x2]
         
-        # Proper alpha blending that preserves positioning
+        # Simple but correct alpha blending
         if fragment_region.shape[2] == 4:  # RGBA
-            # Extract alpha channel from fragment
-            frag_alpha = fragment_region[:, :, 3:4] / 255.0 * fragment.opacity
-            frag_rgb = fragment_region[:, :, :3]
-            
-            # Get existing composite region
-            comp_region = composite[dst_y1:dst_y2, dst_x1:dst_x2]
-            comp_alpha = comp_region[:, :, 3:4] / 255.0
-            comp_rgb = comp_region[:, :, :3]
-            
-            # Proper alpha compositing (over operation)
-            out_alpha = frag_alpha + comp_alpha * (1 - frag_alpha)
-            
-            # Avoid division by zero
-            mask = out_alpha[:, :, 0] > 1e-6
-            out_rgb = np.zeros_like(frag_rgb, dtype=np.float32)
-            
-            # Only blend where there's alpha
-            if np.any(mask):
-                out_rgb[mask, :] = (frag_alpha[mask, :] * frag_rgb[mask, :] + 
-                                   comp_alpha[mask, :] * (1 - frag_alpha[mask, :]) * comp_rgb[mask, :]) / out_alpha[mask, :]
-            
-            # Update composite
-            composite[dst_y1:dst_y2, dst_x1:dst_x2, :3] = np.clip(out_rgb, 0, 255).astype(np.uint8)
-            composite[dst_y1:dst_y2, dst_x1:dst_x2, 3:4] = np.clip(out_alpha * 255, 0, 255).astype(np.uint8)
+            # Simple alpha blending - just place fragment where alpha > 0
+            alpha_mask = fragment_region[:, :, 3] > 0
+            composite[dst_y1:dst_y2, dst_x1:dst_x2][alpha_mask] = fragment_region[alpha_mask]
         else:
-            # Fallback for RGB images
-            alpha = fragment.opacity
+            # RGB images - direct copy
+            composite[dst_y1:dst_y2, dst_x1:dst_x2, :3] = fragment_region
+            composite[dst_y1:dst_y2, dst_x1:dst_x2, 3] = 255  # Full opacity
             
     def save_tiff(self, image: np.ndarray, output_path: str, resolution_dpi: int):
         """Save image as TIFF"""
