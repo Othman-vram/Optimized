@@ -46,6 +46,7 @@ class ImageLoader:
             if file_ext == '.svs' and OPENSLIDE_AVAILABLE:
                 return self._load_openslide_image(file_path, level)
             elif file_ext in {'.tiff', '.tif'}:
+                print("Hello, I am here")
                 return self._load_tiff_image(file_path)
             else:
                 return self._load_standard_image(file_path)
@@ -53,7 +54,7 @@ class ImageLoader:
         except Exception as e:
             raise RuntimeError(f"Failed to load image {file_path}: {str(e)}")
     
-    def _load_openslide_image(self, file_path: str, level: int = 0) -> np.ndarray:
+    def _load_openslide_image(self, file_path: str, level: int = 8) -> np.ndarray:
         """Load image using OpenSlide for pyramidal formats"""
         slide = openslide.OpenSlide(file_path)
         
@@ -74,27 +75,50 @@ class ImageLoader:
         slide.close()
         return image_array
     
-    def _load_tiff_image(self, file_path: str) -> np.ndarray:
-        """Load TIFF image, handling both standard and pyramidal TIFFs"""
+
+
+    def _load_tiff_image(self, file_path: str, level: int = 7) -> np.ndarray:
+        """Load TIFF image using OpenSlide, handling both standard and pyramidal TIFFs"""
         try:
-            # Try tifffile first (handles pyramidal TIFFs better)
-            with tifffile.TiffFile(file_path) as tif:
-                if tif.is_pyramidal:
-                    # Use the first (highest resolution) page
-                    image_array = tif.pages[0].asarray()
-                else:
-                    image_array = tif.asarray()
-                    
-        except Exception:
-            # Fallback to PIL
-            image = Image.open(file_path)
-            # Preserve alpha channel if present
-            if image.mode in ['RGBA', 'LA']:
-                pass  # Keep as is
-            elif image.mode in ['RGB', 'L']:
-                # Add alpha channel
-                image = image.convert('RGBA')
+            # Try OpenSlide first (designed for whole slide images)
+            slide = openslide.OpenSlide(file_path)
+            
+            # Check if the requested level exists
+            max_level = slide.level_count - 1
+            if level > max_level:
+                print(f"Requested level {level} exceeds maximum level {max_level}, using level {max_level}")
+                level = max_level
+            
+            # Get the dimensions of the slide at the specified level
+            level_dimensions = slide.level_dimensions[level]
+            
+            # Read the entire slide at the specified level
+            # read_region(location, level, size) - location is (x, y) in level 0 coordinates
+            # For the entire slide, we start at (0, 0) and read the full dimensions
+            image = slide.read_region((0, 0), level, level_dimensions)
+            
+            # Convert PIL Image to numpy array
             image_array = np.array(image)
+            
+            slide.close()
+            
+        except Exception as e:
+            print(f"OpenSlide failed with error: {e}")
+            print("Falling back to PIL...")
+            
+            # Fallback to PIL
+            try:
+                image = Image.open(file_path)
+                # Preserve alpha channel if present
+                if image.mode in ['RGBA', 'LA']:
+                    pass  # Keep as is
+                elif image.mode in ['RGB', 'L']:
+                    # Add alpha channel
+                    image = image.convert('RGBA')
+                image_array = np.array(image)
+            except Exception as pil_error:
+                print(f"PIL also failed: {pil_error}")
+                raise
         
         # Ensure RGBA format
         if len(image_array.shape) == 2:
@@ -108,8 +132,9 @@ class ImageLoader:
                 alpha = np.full(image_array.shape[:2], 255, dtype=np.uint8)
                 image_array = np.dstack([image_array, alpha])
             # If already RGBA (4 channels), keep as is
-            
+        
         return image_array
+
     
     def _load_standard_image(self, file_path: str) -> np.ndarray:
         """Load standard image formats using OpenCV"""
